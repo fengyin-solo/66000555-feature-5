@@ -1,14 +1,16 @@
 import asyncio, time, random, math, json, threading
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from .authz import authorize_mutation, accounts_view
 
 app = FastAPI(title="Grid Trading Engine")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 ACTIVE_CLIENTS = []
 SIM_RUNNING = True
+MAIN_LOOP = None
 current_price = 100.0
 ticks_history = []
 
@@ -45,19 +47,42 @@ def simulate_market():
         order_book = {"bids": bids, "asks": asks, "midPrice": price, "spread": round(asks[0][0] - bids[0][0], 2)}
 
         payload = json.dumps({"ticks": ticks_history[-60:], "orderBook": order_book})
+        dead = []
         for ws in ACTIVE_CLIENTS:
-            try: asyncio.run_coroutine_threadsafe(ws.send_text(payload), asyncio.get_event_loop())
-            except: pass
+            try:
+                asyncio.run_coroutine_threadsafe(ws.send_text(payload), MAIN_LOOP)
+            except RuntimeError:
+                dead.append(ws)
+        for ws in dead:
+            if ws in ACTIVE_CLIENTS:
+                ACTIVE_CLIENTS.remove(ws)
         time.sleep(0.5)
 
 
 @app.on_event("startup")
 async def startup():
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
     threading.Thread(target=simulate_market, daemon=True).start()
 
 
+@app.get("/api/accounts")
+def get_accounts():
+    return {"accounts": accounts_view()}
+
+
 @app.post("/api/backtest")
-def run_backtest(config: GridConfig):
+def run_backtest(
+    config: GridConfig,
+    x_account_id: str = Header(default=None),
+    x_view_mode: str = Header(default="live"),
+):
+    # 服务端强制校验：只读观察模式 / 观察者账号的越权操作一律拒绝并说明原因
+    denial = authorize_mutation(x_account_id, x_view_mode, "发起回测计算")
+    if denial is not None:
+        status, reason = denial
+        raise HTTPException(status_code=status, detail=reason)
+
     step = (config.upperPrice - config.lowerPrice) / config.gridCount
     grid_prices = [config.lowerPrice + i * step for i in range(config.gridCount + 1)]
 
@@ -106,7 +131,8 @@ def run_backtest(config: GridConfig):
     return_rate = (total_profit / config.initialCapital) * 100
 
     # Sharpe ratio
-    eq_returns = np.diff(equity_curve) / np.array(equity_curve[:-1] + 1e-5)
+    eq_arr = np.array(equity_curve, dtype=float)
+    eq_returns = np.diff(eq_arr) / (eq_arr[:-1] + 1e-5)
     sharpe = float(np.mean(eq_returns) / max(np.std(eq_returns), 1e-5) * np.sqrt(252)) if len(eq_returns) > 1 else 0
 
     # Max drawdown
