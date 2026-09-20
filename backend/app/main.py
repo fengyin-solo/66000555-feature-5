@@ -1,6 +1,6 @@
 import asyncio, time, random, math, json, threading
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -57,7 +57,21 @@ async def startup():
 
 
 @app.post("/api/backtest")
-def run_backtest(config: GridConfig):
+def run_backtest(
+    config: GridConfig,
+    x_account_role: str | None = Header(default=None),
+    x_view_mode: str | None = Header(default=None),
+):
+    # 受控视图服务端鉴权：只读观察模式 / 观察员账号一律拒绝发起计算，
+    # 防止绕过界面直接调用接口。行情推送（/ws）为只读数据，不受限制。
+    # 缺少身份/模式信息同样拒绝（写操作默认关闭）。
+    if x_account_role not in ("trader", "observer") or x_view_mode not in ("interactive", "readonly"):
+        raise HTTPException(status_code=403, detail="缺少账号角色或视图模式信息，无法确认操作权限。")
+    if x_account_role == "observer":
+        raise HTTPException(status_code=403, detail="当前账号为只读观察员，无权发起回测计算。")
+    if x_view_mode == "readonly":
+        raise HTTPException(status_code=403, detail="当前处于只读观察模式，请先退出观察模式后再发起计算。")
+
     step = (config.upperPrice - config.lowerPrice) / config.gridCount
     grid_prices = [config.lowerPrice + i * step for i in range(config.gridCount + 1)]
 

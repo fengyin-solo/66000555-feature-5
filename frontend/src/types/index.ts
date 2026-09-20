@@ -1,3 +1,5 @@
+export type AccountRole = 'trader' | 'observer'
+export interface Account { id: string; name: string; role: AccountRole }
 export interface Tick { time: string; price: number; bid: number; ask: number; volume: number }
 export interface OrderBook { bids: [number,number][]; asks: [number,number][]; midPrice: number; spread: number }
 export interface GridConfig { lowerPrice: number; upperPrice: number; gridCount: number; capitalPerGrid: number; initialCapital: number }
